@@ -4,13 +4,17 @@ import { WebhookEventDto } from './dto/webhook-event.dto';
 import { ConfigService } from '@nestjs/config';
 import { WebhookTokenSignatureDto } from './dto/webhook-token-signature.dto';
 import { WebhookForbiddenException } from './webhook-forbidden.exception';
+import { NotionClientService } from 'src/notion-client/notion-client.service';
 
 @Injectable()
 export class WebhooksService {
   private readonly verificationToken?: string;
   private readonly logger = new Logger(WebhooksService.name);
 
-  constructor(private configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly notionClientService: NotionClientService,
+  ) {
     this.verificationToken = this.configService.get<string>(
       'NOTION_VERIFICATION_TOKEN',
     );
@@ -26,7 +30,71 @@ export class WebhooksService {
       );
     } else if ('type' in event) {
       this.verifyNotionWebhook(event, signature);
-      this.logger.log(`Received event of type: ${event.type}`);
+      void this.handleNotionWebhookEvent(event);
+    }
+  }
+
+  private async handleNotionWebhookEvent(
+    event: WebhookEventDto,
+  ): Promise<void> {
+    switch (event.type) {
+      case 'page.content_updated':
+        await this.handlePageContentUpdated(
+          event as WebhookEventDto<'page.content_updated'>,
+        );
+        break;
+      default:
+        this.logger.log(`Unhandled event type: ${event.type}`);
+        break;
+    }
+  }
+
+  private async handlePageContentUpdated(
+    event: WebhookEventDto<'page.content_updated'>,
+  ): Promise<void> {
+    this.logger.log(
+      `Handling page content updated event for page: ${event.entity.id}`,
+    );
+    const updatedBlocks = event.data.updated_blocks || [];
+    await Promise.all(
+      updatedBlocks.map((block) =>
+        this.handleBlockUpdated(block.id, event.entity.id),
+      ),
+    );
+  }
+
+  private async handleBlockUpdated(
+    blockId: string,
+    pageId: string,
+  ): Promise<void> {
+    try {
+      const block = await this.notionClientService.getBlockById(blockId);
+      if (!block) {
+        this.logger.warn(`Block with ID ${blockId} not found.`);
+        return;
+      }
+      const shouldGenerate =
+        NotionClientService.isPlaceholderBlock(block) &&
+        !block.in_trash &&
+        !block.archived;
+
+      if (shouldGenerate) {
+        const strippedContent =
+          NotionClientService.extractPlaceholderText(block);
+        const context = await this.notionClientService.getAllPageContent(
+          pageId,
+          block.id,
+        );
+        this.logger.log(
+          `Generating image for block: ${strippedContent}, context: ${context}`,
+        );
+      }
+    } catch (error: unknown) {
+      this.logger.error(
+        `Error handling block update for ID ${blockId}:`,
+        error,
+      );
+      return;
     }
   }
 

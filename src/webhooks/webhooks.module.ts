@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 import { WebhooksController } from './webhooks.controller';
 import { WebhooksService } from './webhooks.service';
+import { NotionClientModule } from 'src/notion-client/notion-client.module';
 
 @Module({
+  imports: [NotionClientModule],
   controllers: [WebhooksController],
   providers: [WebhooksService],
 })
