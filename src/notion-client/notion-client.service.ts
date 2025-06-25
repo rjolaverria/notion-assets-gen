@@ -59,6 +59,60 @@ export class NotionClientService {
     return textContent;
   }
 
+  async createFileUpload() {
+    return await this.client.fileUploads.create({
+      mode: 'single_part',
+    });
+  }
+
+  async sendFileUpload(fileUploadId: string, imageData: Buffer | string) {
+    const buffer = Buffer.isBuffer(imageData)
+      ? imageData
+      : Buffer.from(imageData, 'base64');
+
+    const blob = new Blob([buffer], { type: 'image/png' });
+
+    return await this.client.fileUploads.send({
+      file_upload_id: fileUploadId,
+      file: {
+        filename: 'image.png',
+        data: blob,
+      },
+    });
+  }
+
+  async appendBlockChildren(
+    blockId: string,
+    fileUploadId: string,
+    afterBlockId: string,
+  ) {
+    return await this.client.blocks.children.append({
+      block_id: blockId,
+      after: afterBlockId,
+      children: [
+        {
+          type: 'image',
+          image: {
+            type: 'file_upload',
+            file_upload: {
+              id: fileUploadId,
+            },
+          },
+        },
+      ],
+    });
+  }
+
+  async deleteBlock(blockId: string) {
+    try {
+      await this.client.blocks.delete({
+        block_id: blockId,
+      });
+    } catch (error) {
+      this.logger.error(`Error deleting block with ID ${blockId}:`, error);
+    }
+  }
+
   static isPlaceholderBlock(
     block: BlockObjectResponse | null,
   ): block is ParagraphBlockObjectResponse {

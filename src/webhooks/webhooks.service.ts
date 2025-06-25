@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { WebhookTokenSignatureDto } from './dto/webhook-token-signature.dto';
 import { WebhookForbiddenException } from './webhook-forbidden.exception';
 import { NotionClientService } from 'src/notion-client/notion-client.service';
+import { GenaiService } from 'src/genai/genai.service';
 
 @Injectable()
 export class WebhooksService {
@@ -14,6 +15,7 @@ export class WebhooksService {
   constructor(
     private readonly configService: ConfigService,
     private readonly notionClientService: NotionClientService,
+    private readonly genaiService: GenaiService,
   ) {
     this.verificationToken = this.configService.get<string>(
       'NOTION_VERIFICATION_TOKEN',
@@ -52,10 +54,13 @@ export class WebhooksService {
   private async handlePageContentUpdated(
     event: WebhookEventDto<'page.content_updated'>,
   ): Promise<void> {
-    this.logger.log(
-      `Handling page content updated event for page: ${event.entity.id}`,
-    );
     const updatedBlocks = event.data.updated_blocks || [];
+
+    if (updatedBlocks.length === 0) {
+      this.logger.warn('No updated blocks found in the event data.');
+      return;
+    }
+
     await Promise.all(
       updatedBlocks.map((block) =>
         this.handleBlockUpdated(block.id, event.entity.id),
@@ -69,32 +74,50 @@ export class WebhooksService {
   ): Promise<void> {
     try {
       const block = await this.notionClientService.getBlockById(blockId);
-      if (!block) {
-        this.logger.warn(`Block with ID ${blockId} not found.`);
+      if (
+        !block ||
+        block.archived ||
+        block.in_trash ||
+        !NotionClientService.isPlaceholderBlock(block)
+      ) {
+        this.logger.warn(`Skipping block [id=${blockId}]`);
         return;
       }
-      const shouldGenerate =
-        NotionClientService.isPlaceholderBlock(block) &&
-        !block.in_trash &&
-        !block.archived;
 
-      if (shouldGenerate) {
-        const strippedContent =
-          NotionClientService.extractPlaceholderText(block);
-        const context = await this.notionClientService.getAllPageContent(
-          pageId,
-          block.id,
+      const strippedContent = NotionClientService.extractPlaceholderText(block);
+      const context = await this.notionClientService.getAllPageContent(
+        pageId,
+        block.id,
+      );
+      const buf = await this.genaiService.generateImage(
+        context,
+        strippedContent,
+      );
+
+      if (!buf) {
+        this.logger.warn(
+          `No image generated for block: ${JSON.stringify(block, null, 2)}`,
         );
-        this.logger.log(
-          `Generating image for block: ${strippedContent}, context: ${context}`,
-        );
+        return;
       }
+
+      const fileUploadReq = await this.notionClientService.createFileUpload();
+      const fileUpload = await this.notionClientService.sendFileUpload(
+        fileUploadReq.id,
+        buf,
+      );
+
+      await this.notionClientService.appendBlockChildren(
+        pageId,
+        fileUpload.id,
+        block.id,
+      );
+      await this.notionClientService.deleteBlock(block.id);
     } catch (error: unknown) {
       this.logger.error(
         `Error handling block update for ID ${blockId}:`,
         error,
       );
-      return;
     }
   }
 
